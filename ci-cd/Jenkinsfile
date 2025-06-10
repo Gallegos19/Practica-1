@@ -1,9 +1,8 @@
-// Jenkinsfile FINAL - Con Deploy Real a tus servidores EC2
 pipeline {
     agent any
     
     tools {
-        nodejs 'NodeJS'  // Usa la configuración NodeJS que ya tienes
+        nodejs 'NodeJS' 
     }
     
     environment {
@@ -15,6 +14,10 @@ pipeline {
         QA_HOST = credentials('qa-host')
         PROD_HOST = credentials('prod-host')
         
+        echo "DEV_HOST: ${env.DEV_HOST}"
+        echo "QA_HOST: ${env.QA_HOST}"
+        echo "PROD_HOST: ${env.PROD_HOST}"
+
         // SSH Keys
         EC2_SSH_KEY = credentials('ssh-ec2-key')
         
