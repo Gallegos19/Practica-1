@@ -14,9 +14,9 @@ pipeline {
         QA_HOST = credentials('qa-host')
         PROD_HOST = credentials('prod-host')
         
-        echo "DEV_HOST: ${env.DEV_HOST}"
-        echo "QA_HOST: ${env.QA_HOST}"
-        echo "PROD_HOST: ${env.PROD_HOST}"
+        echo "DEV_HOST: ${DEV_HOST}"
+        echo "QA_HOST: ${QA_HOST}"
+        echo "PROD_HOST: ${PROD_HOST}"
 
         // SSH Keys
         EC2_SSH_KEY = credentials('ssh-ec2-key')
