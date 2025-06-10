@@ -1,4 +1,4 @@
-// Jenkinsfile FINAL - Con inicio de servicios usando npm start
+// Jenkinsfile FINAL - Con Deploy Real a tus servidores EC2
 pipeline {
     agent any
     
@@ -10,7 +10,7 @@ pipeline {
         // Build Information
         BUILD_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()}"
         
-        // Environment Hosts
+        // Environment Hosts - USANDO TUS CREDENCIALES CONFIGURADAS
         DEV_HOST = credentials('dev-host')
         QA_HOST = credentials('qa-host')
         PROD_HOST = credentials('prod-host')
@@ -25,7 +25,7 @@ pipeline {
     
     options {
         buildDiscarder(logRotator(numToKeepStr: '10'))
-        timeout(time: 20, unit: 'MINUTES')
+        timeout(time: 30, unit: 'MINUTES') // Aumentado para deploy real
         timestamps()
         skipDefaultCheckout(false)
     }
@@ -40,8 +40,10 @@ pipeline {
                     
                     // Set deployment environment based on branch
                     env.DEPLOY_ENV = getEnvironmentFromBranch(env.BRANCH_NAME)
+                    env.TARGET_HOST = getHostForEnvironment(env.DEPLOY_ENV)
                     
                     echo "🎯 Target environment: ${env.DEPLOY_ENV}"
+                    echo "🖥️ Target host: ${env.TARGET_HOST}"
                 }
             }
         }
@@ -353,72 +355,131 @@ pipeline {
             }
         }
         
-        stage('🐳 Build Docker Images') {
-            parallel {
-                stage('Build Users Service Image') {
-                    when {
-                        expression { fileExists('users-service/Dockerfile') }
-                    }
-                    steps {
-                        script {
-                            echo "🐳 Building Users Service Docker image..."
-                            timeout(time: 10, unit: 'MINUTES') {
-                                sh """
-                                    cd users-service
-                                    echo "Building Docker image: ${USERS_SERVICE_IMAGE}:${BUILD_TAG}"
-                                    
-                                    # Verificar si docker está disponible
-                                    if command -v docker &> /dev/null; then
-                                        docker build -t ${USERS_SERVICE_IMAGE}:${BUILD_TAG} .
-                                        
-                                        # Tag as latest if main branch
-                                        if [ "${env.BRANCH_NAME}" = "main" ]; then
-                                            docker tag ${USERS_SERVICE_IMAGE}:${BUILD_TAG} ${USERS_SERVICE_IMAGE}:latest
-                                        fi
-                                        
-                                        echo "✅ Users Service Docker image built successfully"
-                                        docker images | grep ${USERS_SERVICE_IMAGE} || true
-                                    else
-                                        echo "⚠️ Docker not available, skipping image build"
-                                        echo "Image would be built: ${USERS_SERVICE_IMAGE}:${BUILD_TAG}"
-                                    fi
-                                """
-                            }
-                        }
-                    }
-                }
-                
-                stage('Build Orders Service Image') {
-                    when {
-                        expression { fileExists('orders-service/Dockerfile') }
-                    }
-                    steps {
-                        script {
-                            echo "🐳 Building Orders Service Docker image..."
-                            timeout(time: 10, unit: 'MINUTES') {
-                                sh """
-                                    cd orders-service
-                                    echo "Building Docker image: ${ORDERS_SERVICE_IMAGE}:${BUILD_TAG}"
-                                    
-                                    # Verificar si docker está disponible
-                                    if command -v docker &> /dev/null; then
-                                        docker build -t ${ORDERS_SERVICE_IMAGE}:${BUILD_TAG} .
-                                        
-                                        # Tag as latest if main branch
-                                        if [ "${env.BRANCH_NAME}" = "main" ]; then
-                                            docker tag ${ORDERS_SERVICE_IMAGE}:${BUILD_TAG} ${ORDERS_SERVICE_IMAGE}:latest
-                                        fi
-                                        
-                                        echo "✅ Orders Service Docker image built successfully"
-                                        docker images | grep ${ORDERS_SERVICE_IMAGE} || true
-                                    else
-                                        echo "⚠️ Docker not available, skipping image build"
-                                        echo "Image would be built: ${ORDERS_SERVICE_IMAGE}:${BUILD_TAG}"
-                                    fi
-                                """
-                            }
-                        }
-                    }
+        stage('📦 Prepare Deployment Package') {
+            steps {
+                script {
+                    echo "📦 Preparing deployment package..."
+                    sh '''
+                        echo "Creating deployment package..."
+                        
+                        # Create deployment directory
+                        mkdir -p deployment
+                        
+                        # Copy services (without node_modules for faster transfer)
+                        echo "Copying Users Service..."
+                        mkdir -p deployment/users-service
+                        cp users-service/package*.json deployment/users-service/
+                        cp users-service/server.js deployment/users-service/
+                        cp users-service/Dockerfile deployment/users-service/
+                        
+                        echo "Copying Orders Service..."
+                        mkdir -p deployment/orders-service
+                        cp orders-service/package*.json deployment/orders-service/
+                        cp orders-service/server.js deployment/orders-service/
+                        cp orders-service/Dockerfile deployment/orders-service/
+                        
+                        # Copy infrastructure files
+                        echo "Copying infrastructure files..."
+                        if [ -d "infrastructure" ]; then
+                            cp -r infrastructure deployment/
+                        fi
+                        
+                        # Create docker-compose for production
+                        cat > deployment/docker-compose.yml << 'EOF'
+version: '3.8'
+services:
+  users-service:
+    build: ./users-service
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  orders-service:
+    build: ./orders-service
+    ports:
+      - "3002:3002"
+    environment:
+      - NODE_ENV=production
+      - PORT=3002
+      - USERS_SERVICE_URL=http://users-service:3001
+    depends_on:
+      - users-service
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+EOF
+                        
+                        # Create deployment script
+                        cat > deployment/deploy.sh << 'EOF'
+#!/bin/bash
+set -e
+
+echo "🚀 Starting deployment..."
+
+# Update system packages
+sudo apt update -y
+
+# Install Docker if not present
+if ! command -v docker &> /dev/null; then
+    echo "Installing Docker..."
+    sudo apt install -y docker.io
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    sudo usermod -a -G docker $USER
+fi
+
+# Install Docker Compose if not present
+if ! command -v docker-compose &> /dev/null; then
+    echo "Installing Docker Compose..."
+    sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+fi
+
+# Install Node.js if not present
+if ! command -v node &> /dev/null; then
+    echo "Installing Node.js..."
+    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    sudo apt install -y nodejs
+fi
+
+echo "🛑 Stopping existing services..."
+docker-compose down || true
+
+echo "🔧 Building and starting services..."
+docker-compose up -d --build
+
+echo "⏳ Waiting for services to start..."
+sleep 30
+
+echo "✅ Verifying deployment..."
+curl -f http://localhost:3001/health || exit 1
+curl -f http://localhost:3002/health || exit 1
+
+echo "🎉 Deployment completed successfully!"
+echo "📱 Users Service: http://localhost:3001/health"
+echo "📱 Orders Service: http://localhost:3002/health"
+echo "📖 Users API Docs: http://localhost:3001/api-docs"
+echo "📖 Orders API Docs: http://localhost:3002/api-docs"
+EOF
+                        
+                        chmod +x deployment/deploy.sh
+                        
+                        echo "📦 Deployment package created:"
+                        ls -la deployment/
+                        
+                        echo "✅ Deployment package ready!"
+                    '''
                 }
             }
         }
@@ -433,43 +494,40 @@ pipeline {
             }
             steps {
                 script {
-                    def targetHost = getHostForEnvironment(env.DEPLOY_ENV)
                     echo "🚀 Deploying to ${env.DEPLOY_ENV} environment..."
-                    echo "🖥️ Target host: ${targetHost}"
+                    echo "🖥️ Target host: ${env.TARGET_HOST}"
                     
-                    timeout(time: 10, unit: 'MINUTES') {
-                        sh '''
-                            echo "Preparing deployment..."
-                            echo "Environment: ${DEPLOY_ENV}"
-                            echo "Build tag: ${BUILD_TAG}"
-                            
-                            # Create deployment manifest
-                            cat > deployment-info.txt << EOF
-Deployment Information:
-- Environment: ${DEPLOY_ENV}
-- Build Tag: ${BUILD_TAG}
-- Branch: ${BRANCH_NAME}
-- Commit: $(git rev-parse --short HEAD)
-- Timestamp: $(date)
-- Node.js Version: $(node --version)
-- npm Version: $(npm --version)
-- Services: Users Service (port 3001), Orders Service (port 3002)
-- Integration Test: ✅ Passed
-EOF
-                            
-                            echo "Deployment manifest created:"
-                            cat deployment-info.txt
-                            
-                            # Simulate deployment steps
-                            echo "✅ Dependencies installed successfully"
-                            echo "✅ Tests completed (basic validation)"
-                            echo "✅ Services started and tested"
-                            echo "✅ Integration test passed"
-                            echo "✅ Docker images built (or simulated)"
-                            echo "✅ Ready for deployment to ${DEPLOY_ENV}"
-                            
-                            echo "🎉 Deployment preparation completed successfully!"
-                        '''
+                    timeout(time: 15, unit: 'MINUTES') {
+                        // Use sshagent for secure connection
+                        sshagent(credentials: ['ssh-ec2-key']) {
+                            sh """
+                                echo "📤 Uploading deployment package to ${env.TARGET_HOST}..."
+                                
+                                # Upload deployment package
+                                scp -o StrictHostKeyChecking=no -r deployment/ ubuntu@${env.TARGET_HOST}:~/microservices/
+                                
+                                echo "🚀 Executing deployment on ${env.TARGET_HOST}..."
+                                
+                                # Execute deployment on remote server
+                                ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} << 'EOF_REMOTE'
+                                    cd ~/microservices
+                                    
+                                    echo "Current directory: \$(pwd)"
+                                    echo "Files available:"
+                                    ls -la
+                                    
+                                    # Make deploy script executable
+                                    chmod +x deploy.sh
+                                    
+                                    # Run deployment
+                                    ./deploy.sh
+                                    
+                                    echo "✅ Remote deployment completed!"
+EOF_REMOTE
+
+                                echo "🎉 Deployment to ${env.DEPLOY_ENV} completed successfully!"
+                            """
+                        }
                     }
                 }
             }
@@ -485,36 +543,50 @@ EOF
             }
             steps {
                 script {
-                    echo "✅ Running final health checks..."
-                    sh '''
-                        echo "System information:"
-                        echo "Node.js: $(node --version)"
-                        echo "npm: $(npm --version)"
-                        
-                        echo "Docker status:"
-                        if command -v docker &> /dev/null; then
-                            echo "Docker: $(docker --version)"
-                            echo "Docker images:"
-                            docker images | head -5 || true
-                        else
-                            echo "Docker: Not available"
-                        fi
-                        
-                        echo "System resources:"
-                        echo "Memory: $(free -h | head -2)"
-                        echo "Disk: $(df -h | head -2)"
-                        
-                        echo "Services validation:"
-                        echo "✅ Users Service: Tested and working (port 3001)"
-                        echo "✅ Orders Service: Tested and working (port 3002)"
-                        echo "✅ Integration: Services can communicate"
-                        
-                        echo "Port availability check:"
-                        echo "Port 3001 (Users): $(netstat -tln | grep :3001 && echo 'Available' || echo 'Free')"
-                        echo "Port 3002 (Orders): $(netstat -tln | grep :3002 && echo 'Available' || echo 'Free')"
-                        
-                        echo "✅ Final health check completed successfully!"
-                    '''
+                    echo "✅ Running final health checks on ${env.TARGET_HOST}..."
+                    
+                    timeout(time: 5, unit: 'MINUTES') {
+                        sshagent(credentials: ['ssh-ec2-key']) {
+                            sh """
+                                echo "🏥 Testing deployed services on ${env.TARGET_HOST}..."
+                                
+                                ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} << 'EOF_HEALTH'
+                                    echo "Testing Users Service..."
+                                    curl -f http://localhost:3001/health || exit 1
+                                    
+                                    echo "Testing Orders Service..."
+                                    curl -f http://localhost:3002/health || exit 1
+                                    
+                                    echo "Testing integration..."
+                                    # Create test user
+                                    USER_RESPONSE=\$(curl -s -X POST http://localhost:3001/users \\
+                                        -H "Content-Type: application/json" \\
+                                        -d '{"name": "Deployment Test", "email": "deploy@test.com"}')
+                                    
+                                    USER_ID=\$(echo \$USER_RESPONSE | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+                                    
+                                    if [ -n "\$USER_ID" ]; then
+                                        # Create test order
+                                        ORDER_RESPONSE=\$(curl -s -X POST http://localhost:3002/orders \\
+                                            -H "Content-Type: application/json" \\
+                                            -d "{\\"userId\\": \\"\$USER_ID\\", \\"items\\": [{\\"name\\": \\"Deploy Test\\", \\"quantity\\": 1, \\"price\\": 5.00}], \\"total\\": 5.00}")
+                                        
+                                        if echo \$ORDER_RESPONSE | grep -q '"id"'; then
+                                            echo "✅ Integration test passed on deployed services!"
+                                        else
+                                            echo "⚠️ Integration test failed on deployed services"
+                                            exit 1
+                                        fi
+                                    else
+                                        echo "⚠️ User creation failed on deployed services"
+                                        exit 1
+                                    fi
+                                    
+                                    echo "🎉 All health checks passed on ${env.DEPLOY_ENV}!"
+EOF_HEALTH
+                            """
+                        }
+                    }
                 }
             }
         }
@@ -534,9 +606,9 @@ EOF
                     echo "✅ Process cleanup completed"
                 '''
                 
-                // Archive deployment info
+                // Archive deployment package
                 try {
-                    archiveArtifacts artifacts: 'deployment-info.txt', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'deployment/**', allowEmptyArchive: true
                 } catch (Exception e) {
                     echo "No artifacts to archive: ${e.getMessage()}"
                 }
@@ -560,6 +632,7 @@ EOF
                 - Duration: ${currentBuild.durationString}
                 - Result: ${currentBuild.currentResult}
                 - Services: Users (3001) + Orders (3002)
+                - Deployed to: ${env.TARGET_HOST ?: 'N/A'}
                 """
             }
         }
@@ -569,12 +642,15 @@ EOF
                 echo "🎉 Pipeline completed successfully!"
                 echo "✅ All stages passed"
                 echo "🎯 Environment: ${env.DEPLOY_ENV}"
-                echo "🚀 Both services tested and working!"
-                echo "📱 Users Service: http://your-server:3001/health"
-                echo "📱 Orders Service: http://your-server:3002/health"
-                echo "📖 API Documentation:"
-                echo "   - Users API: http://your-server:3001/api-docs"
-                echo "   - Orders API: http://your-server:3002/api-docs"
+                echo "🚀 Services deployed and tested!"
+                
+                if (env.TARGET_HOST) {
+                    echo "📱 Users Service: http://${env.TARGET_HOST}:3001/health"
+                    echo "📱 Orders Service: http://${env.TARGET_HOST}:3002/health"
+                    echo "📖 API Documentation:"
+                    echo "   - Users API: http://${env.TARGET_HOST}:3001/api-docs"
+                    echo "   - Orders API: http://${env.TARGET_HOST}:3002/api-docs"
+                }
             }
         }
         
@@ -588,6 +664,8 @@ EOF
                     echo "Pipeline failed at: $(date)" > failure-summary.txt
                     echo "Branch: ${BRANCH_NAME}" >> failure-summary.txt
                     echo "Build: ${BUILD_NUMBER}" >> failure-summary.txt
+                    echo "Environment: ${DEPLOY_ENV}" >> failure-summary.txt
+                    echo "Target Host: ${TARGET_HOST}" >> failure-summary.txt
                     echo "Stage: Check console output" >> failure-summary.txt
                 '''
                 
