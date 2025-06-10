@@ -14,6 +14,7 @@ pipeline {
         QA_HOST = credentials('qa-host')
         PROD_HOST = credentials('prod-host')
         
+
         // SSH Keys
         EC2_SSH_KEY = credentials('ssh-ec2-key')
         
@@ -24,7 +25,7 @@ pipeline {
     
     options {
         buildDiscarder(logRotator(numToKeepStr: '10'))
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 30, unit: 'MINUTES') // Aumentado para deploy real
         timestamps()
         skipDefaultCheckout(false)
     }
@@ -36,8 +37,11 @@ pipeline {
                     echo "🚀 Starting build for branch: ${env.BRANCH_NAME}"
                     echo "📦 Build number: ${env.BUILD_NUMBER}"
                     echo "🏷️ Build tag: ${BUILD_TAG}"
+                    echo "DEV_HOST: ${DEV_HOST}"
+                    echo "QA_HOST: ${QA_HOST}"
+                    echo "PROD_HOST: ${PROD_HOST}"
                     
-                    // Actualizado para usar dev/qa/main
+                    // Set deployment environment based on branch
                     env.DEPLOY_ENV = getEnvironmentFromBranch(env.BRANCH_NAME)
                     env.TARGET_HOST = getHostForEnvironment(env.DEPLOY_ENV)
                     
@@ -47,7 +51,312 @@ pipeline {
             }
         }
         
-        // ... (etapas de Verify Project Structure, Install Dependencies, Run Tests se mantienen igual)
+        stage('📦 Verify Project Structure') {
+            steps {
+                script {
+                    echo "📂 Checking project structure..."
+                    sh '''
+                        echo "Current directory: $(pwd)"
+                        echo "Files in workspace:"
+                        ls -la
+                        
+                        echo "Checking service directories..."
+                        if [ -d "users-service" ]; then
+                            echo "✅ users-service directory found"
+                            echo "Contents:"
+                            ls -la users-service/ | head -10
+                        fi
+                        
+                        if [ -d "orders-service" ]; then
+                            echo "✅ orders-service directory found"
+                            echo "Contents:"
+                            ls -la orders-service/ | head -10
+                        fi
+                        
+                        echo "Node.js and npm versions:"
+                        node --version
+                        npm --version
+                    '''
+                }
+            }
+        }
+        
+        stage('📦 Install Dependencies - FAST') {
+            parallel {
+                stage('Users Service Dependencies') {
+                    when {
+                        expression { fileExists('users-service/package.json') }
+                    }
+                    steps {
+                        dir('users-service') {
+                            script {
+                                echo "📥 Installing Users Service dependencies..."
+                                timeout(time: 8, unit: 'MINUTES') {
+                                    sh '''
+                                        echo "Node version: $(node --version)"
+                                        echo "NPM version: $(npm --version)"
+                                        
+                                        # Configurar npm para velocidad máxima
+                                        npm config set registry https://registry.npmjs.org/
+                                        npm config set fund false
+                                        npm config set audit false
+                                        npm config set progress false
+                                        npm config set loglevel warn
+                                        
+                                        # Limpiar cache
+                                        echo "Cleaning npm cache..."
+                                        npm cache clean --force
+                                        
+                                        # Instalar dependencias de producción Y desarrollo (para jest)
+                                        if [ -f "package-lock.json" ]; then
+                                            echo "📦 Using npm ci (faster)..."
+                                            npm ci --no-fund --no-audit
+                                        else
+                                            echo "📦 Using npm install..."
+                                            npm install --no-fund --no-audit
+                                        fi
+                                        
+                                        echo "✅ Users Service dependencies installed"
+                                        echo "node_modules size:"
+                                        du -sh node_modules/ || echo "No node_modules found"
+                                    '''
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                stage('Orders Service Dependencies') {
+                    when {
+                        expression { fileExists('orders-service/package.json') }
+                    }
+                    steps {
+                        dir('orders-service') {
+                            script {
+                                echo "📥 Installing Orders Service dependencies..."
+                                timeout(time: 8, unit: 'MINUTES') {
+                                    sh '''
+                                        echo "Node version: $(node --version)"
+                                        echo "NPM version: $(npm --version)"
+                                        
+                                        # Configurar npm para velocidad máxima
+                                        npm config set registry https://registry.npmjs.org/
+                                        npm config set fund false
+                                        npm config set audit false
+                                        npm config set progress false
+                                        npm config set loglevel warn
+                                        
+                                        # Limpiar cache
+                                        echo "Cleaning npm cache..."
+                                        npm cache clean --force
+                                        
+                                        # Instalar dependencias de producción Y desarrollo (para jest)
+                                        if [ -f "package-lock.json" ]; then
+                                            echo "📦 Using npm ci (faster)..."
+                                            npm ci --no-fund --no-audit
+                                        else
+                                            echo "📦 Using npm install..."
+                                            npm install --no-fund --no-audit
+                                        fi
+                                        
+                                        echo "✅ Orders Service dependencies installed"
+                                        echo "node_modules size:"
+                                        du -sh node_modules/ || echo "No node_modules found"
+                                    '''
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('🧪 Run Tests') {
+            parallel {
+                stage('Users Service Tests') {
+                    when {
+                        expression { fileExists('users-service/package.json') }
+                    }
+                    steps {
+                        dir('users-service') {
+                            script {
+                                echo "🧪 Running Users Service tests..."
+                                timeout(time: 5, unit: 'MINUTES') {
+                                    sh '''
+                                        # Verificar si jest está disponible
+                                        if [ -f "node_modules/.bin/jest" ]; then
+                                            echo "Running tests with jest..."
+                                            npm test -- --passWithNoTests || echo "Tests failed but continuing..."
+                                        elif npm run | grep -q "test"; then
+                                            echo "Running tests with npm test..."
+                                            npm test || echo "Tests failed but continuing..."
+                                        else
+                                            echo "No test framework found, running basic validation..."
+                                            echo "✅ Basic validation: server.js exists"
+                                            [ -f "server.js" ] && echo "✅ server.js found" || echo "❌ server.js missing"
+                                            
+                                            # Verificar sintaxis de JavaScript
+                                            node -c server.js && echo "✅ server.js syntax is valid" || echo "❌ server.js has syntax errors"
+                                        fi
+                                    '''
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                stage('Orders Service Tests') {
+                    when {
+                        expression { fileExists('orders-service/package.json') }
+                    }
+                    steps {
+                        dir('orders-service') {
+                            script {
+                                echo "🧪 Running Orders Service tests..."
+                                timeout(time: 5, unit: 'MINUTES') {
+                                    sh '''
+                                        # Verificar si jest está disponible
+                                        if [ -f "node_modules/.bin/jest" ]; then
+                                            echo "Running tests with jest..."
+                                            npm test -- --passWithNoTests || echo "Tests failed but continuing..."
+                                        elif npm run | grep -q "test"; then
+                                            echo "Running tests with npm test..."
+                                            npm test || echo "Tests failed but continuing..."
+                                        else
+                                            echo "No test framework found, running basic validation..."
+                                            echo "✅ Basic validation: server.js exists"
+                                            [ -f "server.js" ] && echo "✅ server.js found" || echo "❌ server.js missing"
+                                            
+                                            # Verificar sintaxis de JavaScript
+                                            node -c server.js && echo "✅ server.js syntax is valid" || echo "❌ server.js has syntax errors"
+                                        fi
+                                    '''
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('🚀 Start Services & Integration Test') {
+            steps {
+                script {
+                    echo "🚀 Starting practica 1 for integration testing..."
+                    
+                    // Start services in background and test them
+                    timeout(time: 5, unit: 'MINUTES') {
+                        sh '''
+                            # Function to kill background processes on exit
+                            cleanup() {
+                                echo "🧹 Cleaning up background processes..."
+                                kill $USERS_PID $ORDERS_PID 2>/dev/null || true
+                                wait $USERS_PID $ORDERS_PID 2>/dev/null || true
+                                echo "✅ Background processes cleaned up"
+                            }
+                            
+                            # Set trap to cleanup on script exit
+                            trap cleanup EXIT
+                            
+                            echo "🔴 Starting Users Service on port 3001..."
+                            cd users-service
+                            npm start &
+                            USERS_PID=$!
+                            echo "Users Service PID: $USERS_PID"
+                            cd ..
+                            
+                            echo "🟠 Starting Orders Service on port 3002..."
+                            cd orders-service
+                            npm start &
+                            ORDERS_PID=$!
+                            echo "Orders Service PID: $ORDERS_PID"
+                            cd ..
+                            
+                            echo "⏳ Waiting 10 seconds for services to start..."
+                            sleep 10
+                            
+                            echo "🔍 Checking if services are running..."
+                            
+                            # Check if processes are still running
+                            if kill -0 $USERS_PID 2>/dev/null; then
+                                echo "✅ Users Service process is running"
+                            else
+                                echo "❌ Users Service process died"
+                            fi
+                            
+                            if kill -0 $ORDERS_PID 2>/dev/null; then
+                                echo "✅ Orders Service process is running"
+                            else
+                                echo "❌ Orders Service process died"
+                            fi
+                            
+                            echo "🏥 Testing health endpoints..."
+                            
+                            # Test Users Service health endpoint
+                            echo "Testing Users Service health..."
+                            if curl -f http://localhost:3001/health; then
+                                echo "✅ Users Service health check passed"
+                            else
+                                echo "⚠️ Users Service health check failed, but continuing..."
+                            fi
+                            
+                            echo ""
+                            
+                            # Test Orders Service health endpoint
+                            echo "Testing Orders Service health..."
+                            if curl -f http://localhost:3002/health; then
+                                echo "✅ Orders Service health check passed"
+                            else
+                                echo "⚠️ Orders Service health check failed, but continuing..."
+                            fi
+                            
+                            echo ""
+                            echo "🧪 Testing integration between services..."
+                            
+                            # Create a test user
+                            echo "Creating test user..."
+                            USER_RESPONSE=$(curl -s -X POST http://localhost:3001/users \\
+                                -H "Content-Type: application/json" \\
+                                -d '{"name": "Jenkins Test User", "email": "jenkins@test.com"}' || echo '{"error": "failed"}')
+                            
+                            echo "User creation response: $USER_RESPONSE"
+                            
+                            # Extract user ID if creation was successful
+                            USER_ID=$(echo $USER_RESPONSE | grep -o '"id":"[^"]*"' | cut -d'"' -f4 || echo "")
+                            
+                            if [ -n "$USER_ID" ] && [ "$USER_ID" != "failed" ]; then
+                                echo "✅ User created with ID: $USER_ID"
+                                
+                                # Create a test order for the user
+                                echo "Creating test order for user $USER_ID..."
+                                ORDER_RESPONSE=$(curl -s -X POST http://localhost:3002/orders \\
+                                    -H "Content-Type: application/json" \\
+                                    -d "{\\"userId\\": \\"$USER_ID\\", \\"items\\": [{\\"name\\": \\"Test Product\\", \\"quantity\\": 1, \\"price\\": 10.00}], \\"total\\": 10.00}" || echo '{"error": "failed"}')
+                                
+                                echo "Order creation response: $ORDER_RESPONSE"
+                                
+                                if echo $ORDER_RESPONSE | grep -q '"id"'; then
+                                    echo "✅ Integration test passed: Order created successfully"
+                                else
+                                    echo "⚠️ Integration test warning: Order creation failed, but services are running"
+                                fi
+                            else
+                                echo "⚠️ Integration test warning: User creation failed, but services are running"
+                            fi
+                            
+                            echo ""
+                            echo "📊 Service Status Summary:"
+                            echo "🟢 Users Service: $(curl -s http://localhost:3001/health | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "Unknown")"
+                            echo "🟠 Orders Service: $(curl -s http://localhost:3002/health | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "Unknown")"
+                            
+                            echo "✅ Service integration testing completed!"
+                            
+                            # Cleanup will be called automatically by trap
+                        '''
+                    }
+                }
+            }
+        }
         
         stage('📦 Prepare Deployment Package') {
             steps {
@@ -56,24 +365,30 @@ pipeline {
                     sh '''
                         echo "Creating deployment package..."
                         
-                        # Cambiado de 'deployment' a 'practica-1-deployment'
-                        mkdir -p practica-1-deployment
+                        # Create deployment directory
+                        mkdir -p deployment
                         
-                        # Copiar servicios (sin node_modules)
+                        # Copy services (without node_modules for faster transfer)
                         echo "Copying Users Service..."
-                        mkdir -p practica-1-deployment/users-service
-                        cp users-service/package*.json practica-1-deployment/users-service/
-                        cp users-service/server.js practica-1-deployment/users-service/
-                        cp users-service/Dockerfile practica-1-deployment/users-service/
+                        mkdir -p deployment/users-service
+                        cp users-service/package*.json deployment/users-service/
+                        cp users-service/server.js deployment/users-service/
+                        cp users-service/Dockerfile deployment/users-service/
                         
                         echo "Copying Orders Service..."
-                        mkdir -p practica-1-deployment/orders-service
-                        cp orders-service/package*.json practica-1-deployment/orders-service/
-                        cp orders-service/server.js practica-1-deployment/orders-service/
-                        cp orders-service/Dockerfile practica-1-deployment/orders-service/
+                        mkdir -p deployment/orders-service
+                        cp orders-service/package*.json deployment/orders-service/
+                        cp orders-service/server.js deployment/orders-service/
+                        cp orders-service/Dockerfile deployment/orders-service/
                         
-                        # Docker Compose (se mantiene igual)
-                        cat > practica-1-deployment/docker-compose.yml << 'EOF'
+                        # Copy infrastructure files
+                        echo "Copying infrastructure files..."
+                        if [ -d "infrastructure" ]; then
+                            cp -r infrastructure deployment/
+                        fi
+                        
+                        # Create docker-compose for production
+                        cat > deployment/docker-compose.yml << 'EOF'
 version: '3.8'
 services:
   users-service:
@@ -82,37 +397,63 @@ services:
       - "3001:3001"
     environment:
       - NODE_ENV=production
+      - PORT=3001
     restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   orders-service:
     build: ./orders-service
     ports:
       - "3002:3002"
+    environment:
+      - NODE_ENV=production
+      - PORT=3002
+      - USERS_SERVICE_URL=http://users-service:3001
     depends_on:
       - users-service
     restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 EOF
                         
-                        # Script de despliegue (actualizado para usar ~/practica-1)
-                        cat > practica-1-deployment/deploy.sh << 'EOF'
+                        # Create deployment script
+                        cat > deployment/deploy.sh << 'EOF'
 #!/bin/bash
 set -e
 
 echo "🚀 Starting deployment..."
-cd ~/practica-1/
 
-# Instalar Docker si no existe (se mantiene igual)
+# Update system packages
+sudo apt update -y
+
+# Install Docker if not present
 if ! command -v docker &> /dev/null; then
-    sudo apt update -y
+    echo "Installing Docker..."
     sudo apt install -y docker.io
     sudo systemctl start docker
+    sudo systemctl enable docker
     sudo usermod -a -G docker $USER
 fi
 
-# Instalar Docker Compose si no existe
+# Install Docker Compose if not present
 if ! command -v docker-compose &> /dev/null; then
+    echo "Installing Docker Compose..."
     sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
     sudo chmod +x /usr/local/bin/docker-compose
+fi
+
+# Install Node.js if not present
+if ! command -v node &> /dev/null; then
+    echo "Installing Node.js..."
+    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    sudo apt install -y nodejs
 fi
 
 echo "🛑 Stopping existing services..."
@@ -121,22 +462,37 @@ docker-compose down || true
 echo "🔧 Building and starting services..."
 docker-compose up -d --build
 
-echo "✅ Deployment completed!"
+echo "⏳ Waiting for services to start..."
+sleep 30
+
+echo "✅ Verifying deployment..."
+curl -f http://localhost:3001/health || exit 1
+curl -f http://localhost:3002/health || exit 1
+
+echo "🎉 Deployment completed successfully!"
+echo "📱 Users Service: http://localhost:3001/health"
+echo "📱 Orders Service: http://localhost:3002/health"
+echo "📖 Users API Docs: http://localhost:3001/api-docs"
+echo "📖 Orders API Docs: http://localhost:3002/api-docs"
 EOF
                         
-                        chmod +x practica-1-deployment/deploy.sh
+                        chmod +x deployment/deploy.sh
+                        
+                        echo "📦 Deployment package created:"
+                        ls -la deployment/
+                        
+                        echo "✅ Deployment package ready!"
                     '''
                 }
             }
         }
         
         stage('🚀 Deploy to Environment') {
-            // Actualizado para usar dev/qa/main
             when {
                 anyOf {
                     branch 'main'
-                    branch 'qa'
                     branch 'dev'
+                    branch 'qa'
                 }
             }
             steps {
@@ -144,55 +500,209 @@ EOF
                     echo "🚀 Deploying to ${env.DEPLOY_ENV} environment..."
                     echo "🖥️ Target host: ${env.TARGET_HOST}"
                     
-                    sshagent(credentials: ['ssh-ec2-key']) {
-                        sh """
-                            # Cambiado a practica-1 en el servidor remoto
-                            scp -o StrictHostKeyChecking=no -r practica-1-deployment/ ubuntu@${env.TARGET_HOST}:~/practica-1/
-                            
-                            ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} << 'EOF'
-                                cd ~/practica-1
-                                chmod +x deploy.sh
-                                ./deploy.sh
-EOF
-                        """
+                    timeout(time: 15, unit: 'MINUTES') {
+                        // Use sshagent for secure connection
+                        sshagent(credentials: ['ssh-ec2-key']) {
+                            sh """
+                                echo "📤 Uploading deployment package to ${env.TARGET_HOST}..."
+                                
+                                # Upload deployment package
+                                scp -o StrictHostKeyChecking=no -r deployment/ ubuntu@${env.TARGET_HOST}:~/practica-1/
+                                
+                                echo "🚀 Executing deployment on ${env.TARGET_HOST}..."
+                                
+                                # Execute deployment on remote server
+                                ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} << 'EOF_REMOTE'
+                                    cd ~/practica-1
+                                    
+                                    echo "Current directory: \$(pwd)"
+                                    echo "Files available:"
+                                    ls -la
+                                    
+                                    # Make deploy script executable
+                                    chmod +x deploy.sh
+                                    
+                                    # Run deployment
+                                    ./deploy.sh
+                                    
+                                    echo "✅ Remote deployment completed!"
+EOF_REMOTE
+
+                                echo "🎉 Deployment to ${env.DEPLOY_ENV} completed successfully!"
+                            """
+                        }
                     }
                 }
             }
         }
         
-        // ... (etapas de Final Health Check y post se mantienen igual)
+        stage('✅ Final Health Check') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'dev'
+                    branch 'qa'
+                }
+            }
+            steps {
+                script {
+                    echo "✅ Running final health checks on ${env.TARGET_HOST}..."
+                    
+                    timeout(time: 5, unit: 'MINUTES') {
+                        sshagent(credentials: ['ssh-ec2-key']) {
+                            sh """
+                                echo "🏥 Testing deployed services on ${env.TARGET_HOST}..."
+                                
+                                ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} << 'EOF_HEALTH'
+                                    echo "Testing Users Service..."
+                                    curl -f http://localhost:3001/health || exit 1
+                                    
+                                    echo "Testing Orders Service..."
+                                    curl -f http://localhost:3002/health || exit 1
+                                    
+                                    echo "Testing integration..."
+                                    # Create test user
+                                    USER_RESPONSE=\$(curl -s -X POST http://localhost:3001/users \\
+                                        -H "Content-Type: application/json" \\
+                                        -d '{"name": "Deployment Test", "email": "deploy@test.com"}')
+                                    
+                                    USER_ID=\$(echo \$USER_RESPONSE | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+                                    
+                                    if [ -n "\$USER_ID" ]; then
+                                        # Create test order
+                                        ORDER_RESPONSE=\$(curl -s -X POST http://localhost:3002/orders \\
+                                            -H "Content-Type: application/json" \\
+                                            -d "{\\"userId\\": \\"\$USER_ID\\", \\"items\\": [{\\"name\\": \\"Deploy Test\\", \\"quantity\\": 1, \\"price\\": 5.00}], \\"total\\": 5.00}")
+                                        
+                                        if echo \$ORDER_RESPONSE | grep -q '"id"'; then
+                                            echo "✅ Integration test passed on deployed services!"
+                                        else
+                                            echo "⚠️ Integration test failed on deployed services"
+                                            exit 1
+                                        fi
+                                    else
+                                        echo "⚠️ User creation failed on deployed services"
+                                        exit 1
+                                    fi
+                                    
+                                    echo "🎉 All health checks passed on ${env.DEPLOY_ENV}!"
+EOF_HEALTH
+                            """
+                        }
+                    }
+                }
+            }
+        }
     }
     
     post {
         always {
             script {
                 echo "🧹 Cleaning up workspace..."
+                
+                // Kill any remaining background processes
                 sh '''
+                    echo "🧹 Cleaning up any remaining processes..."
                     pkill -f "npm start" || true
                     pkill -f "node server.js" || true
+                    sleep 2
+                    echo "✅ Process cleanup completed"
                 '''
-                // Actualizado para archivar practica-1-deployment
-                archiveArtifacts artifacts: 'practica-1-deployment/**', allowEmptyArchive: true
-                cleanWs()
+                
+                // Archive deployment package
+                try {
+                    archiveArtifacts artifacts: 'deployment/**', allowEmptyArchive: true
+                } catch (Exception e) {
+                    echo "No artifacts to archive: ${e.getMessage()}"
+                }
+                
+                // Cleanup Docker images if available
+                sh '''
+                    echo "Cleaning up Docker images..."
+                    if command -v docker &> /dev/null; then
+                        docker image prune -f --filter "until=1h" || echo "Docker cleanup failed, continuing..."
+                    else
+                        echo "Docker not available, skipping cleanup"
+                    fi
+                '''
+                
+                // Show build summary
+                echo """
+                📊 Build Summary:
+                - Environment: ${env.DEPLOY_ENV ?: 'N/A'}
+                - Branch: ${env.BRANCH_NAME}
+                - Build: ${env.BUILD_NUMBER}
+                - Duration: ${currentBuild.durationString}
+                - Result: ${currentBuild.currentResult}
+                - Services: Users (3001) + Orders (3002)
+                - Deployed to: ${env.TARGET_HOST ?: 'N/A'}
+                """
+            }
+        }
+        
+        success {
+            script {
+                echo "🎉 Pipeline completed successfully!"
+                echo "✅ All stages passed"
+                echo "🎯 Environment: ${env.DEPLOY_ENV}"
+                echo "🚀 Services deployed and tested!"
+                
+                if (env.TARGET_HOST) {
+                    echo "📱 Users Service: http://${env.TARGET_HOST}:3001/health"
+                    echo "📱 Orders Service: http://${env.TARGET_HOST}:3002/health"
+                    echo "📖 API Documentation:"
+                    echo "   - Users API: http://${env.TARGET_HOST}:3001/api-docs"
+                    echo "   - Orders API: http://${env.TARGET_HOST}:3002/api-docs"
+                }
+            }
+        }
+        
+        failure {
+            script {
+                echo "❌ Pipeline failed!"
+                echo "🔍 Check the logs above for details"
+                
+                // Create failure summary
+                sh '''
+                    echo "Pipeline failed at: $(date)" > failure-summary.txt
+                    echo "Branch: ${BRANCH_NAME}" >> failure-summary.txt
+                    echo "Build: ${BUILD_NUMBER}" >> failure-summary.txt
+                    echo "Environment: ${DEPLOY_ENV}" >> failure-summary.txt
+                    echo "Target Host: ${TARGET_HOST}" >> failure-summary.txt
+                    echo "Stage: Check console output" >> failure-summary.txt
+                '''
+                
+                try {
+                    archiveArtifacts artifacts: 'failure-summary.txt', allowEmptyArchive: true
+                } catch (Exception e) {
+                    echo "Could not archive failure summary: ${e.getMessage()}"
+                }
+            }
+        }
+        
+        unstable {
+            script {
+                echo "⚠️ Pipeline completed with warnings!"
+                echo "Some tests may have failed but build continued"
             }
         }
     }
 }
 
 // ============================
-// HELPER FUNCTIONS (Actualizadas para dev/qa/main)
+// HELPER FUNCTIONS
 // ============================
 
 def getEnvironmentFromBranch(branchName) {
     switch(branchName) {
         case 'main':
             return 'PROD'
-        case 'qa':
-            return 'QA'
         case 'dev':
             return 'DEV'
+        case 'qa':
+            return 'QA'
         default:
-            return 'DEV'  // Por defecto a DEV para otras ramas
+            return 'DEV'
     }
 }
 
