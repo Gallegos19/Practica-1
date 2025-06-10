@@ -14,9 +14,6 @@ pipeline {
         QA_HOST = credentials('qa-host')
         PROD_HOST = credentials('prod-host')
         
-        echo "DEV_HOST: ${DEV_HOST}"
-        echo "QA_HOST: ${QA_HOST}"
-        echo "PROD_HOST: ${PROD_HOST}"
 
         // SSH Keys
         EC2_SSH_KEY = credentials('ssh-ec2-key')
@@ -40,6 +37,9 @@ pipeline {
                     echo "🚀 Starting build for branch: ${env.BRANCH_NAME}"
                     echo "📦 Build number: ${env.BUILD_NUMBER}"
                     echo "🏷️ Build tag: ${BUILD_TAG}"
+                    echo "DEV_HOST: ${DEV_HOST}"
+                    echo "QA_HOST: ${QA_HOST}"
+                    echo "PROD_HOST: ${PROD_HOST}"
                     
                     // Set deployment environment based on branch
                     env.DEPLOY_ENV = getEnvironmentFromBranch(env.BRANCH_NAME)
