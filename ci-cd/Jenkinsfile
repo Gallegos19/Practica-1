@@ -24,9 +24,9 @@ pipeline {
         PROD_HOST = credentials('prod-host')
         
         // SSH Keys
-        DEV_SSH_KEY = credentials('dev-ssh-key')
-        QA_SSH_KEY = credentials('qa-ssh-key')
-        PROD_SSH_KEY = credentials('prod-ssh-key')
+        DEV_SSH_KEY = credentials('ssh-ec2-key')
+        QA_SSH_KEY = credentials('ssh-ec2-key')
+        PROD_SSH_KEY = credentials('ssh-ec2-key')
         
         // Notification
         SLACK_WEBHOOK = credentials('slack-webhook-url')
