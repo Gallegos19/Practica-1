@@ -1,0 +1,732 @@
+// Jenkinsfile - Pipeline Completo para Microservicios
+pipeline {
+    agent any
+    
+    environment {
+        // Docker Registry Configuration
+        DOCKER_REGISTRY = 'your-docker-registry.com'
+        DOCKER_CREDENTIALS = 'docker-registry-credentials'
+        
+        // Images Names
+        USERS_SERVICE_IMAGE = 'users-service'
+        ORDERS_SERVICE_IMAGE = 'orders-service'
+        
+        // Build Information
+        BUILD_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()}"
+        
+        // AWS Configuration
+        AWS_REGION = 'us-east-1'
+        AWS_CREDENTIALS = 'aws-credentials'
+        
+        // Environment Hosts
+        DEV_HOST = credentials('dev-host')
+        QA_HOST = credentials('qa-host')
+        PROD_HOST = credentials('prod-host')
+        
+        // SSH Keys
+        DEV_SSH_KEY = credentials('dev-ssh-key')
+        QA_SSH_KEY = credentials('qa-ssh-key')
+        PROD_SSH_KEY = credentials('prod-ssh-key')
+        
+        // Notification
+        SLACK_WEBHOOK = credentials('slack-webhook-url')
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        retry(1)
+    }
+    
+    triggers {
+        // Poll SCM every 5 minutes
+        pollSCM('H/5 * * * *')
+        
+        // Webhook trigger (configured in GitHub)
+        githubPush()
+    }
+    
+    stages {
+        stage('🔍 Checkout & Environment Setup') {
+            steps {
+                script {
+                    // Clean workspace
+                    cleanWs()
+                    
+                    // Checkout code
+                    checkout scm
+                    
+                    // Display build information
+                    echo "🚀 Starting build for branch: ${env.BRANCH_NAME}"
+                    echo "📦 Build number: ${env.BUILD_NUMBER}"
+                    echo "🏷️ Build tag: ${BUILD_TAG}"
+                    
+                    // Set deployment environment based on branch
+                    env.DEPLOY_ENV = getEnvironmentFromBranch(env.BRANCH_NAME)
+                    env.TARGET_HOST = getHostForEnvironment(env.DEPLOY_ENV)
+                    
+                    echo "🎯 Target environment: ${env.DEPLOY_ENV}"
+                    echo "🖥️ Target host: ${env.TARGET_HOST}"
+                }
+            }
+        }
+        
+        stage('📦 Install Dependencies') {
+            parallel {
+                stage('Users Service Dependencies') {
+                    steps {
+                        dir('users-service') {
+                            script {
+                                echo "📥 Installing Users Service dependencies..."
+                                sh 'npm ci --only=production'
+                                sh 'npm audit --audit-level moderate'
+                            }
+                        }
+                    }
+                }
+                stage('Orders Service Dependencies') {
+                    steps {
+                        dir('orders-service') {
+                            script {
+                                echo "📥 Installing Orders Service dependencies..."
+                                sh 'npm ci --only=production'
+                                sh 'npm audit --audit-level moderate'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('🔍 Code Quality & Security') {
+            parallel {
+                stage('Lint Users Service') {
+                    steps {
+                        dir('users-service') {
+                            script {
+                                echo "🔍 Running linting for Users Service..."
+                                sh 'npm run lint || true'
+                            }
+                        }
+                    }
+                }
+                stage('Lint Orders Service') {
+                    steps {
+                        dir('orders-service') {
+                            script {
+                                echo "🔍 Running linting for Orders Service..."
+                                sh 'npm run lint || true'
+                            }
+                        }
+                    }
+                }
+                stage('Security Scan') {
+                    steps {
+                        script {
+                            echo "🛡️ Running security scan..."
+                            sh '''
+                                # Install and run security tools
+                                npm install -g npm-audit-resolver
+                                
+                                # Audit both services
+                                cd users-service && npm audit --audit-level high || true
+                                cd ../orders-service && npm audit --audit-level high || true
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('🧪 Run Tests') {
+            parallel {
+                stage('Users Service Tests') {
+                    steps {
+                        dir('users-service') {
+                            script {
+                                echo "🧪 Running Users Service tests..."
+                                sh '''
+                                    npm install --save-dev jest supertest
+                                    npm test || true
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            script {
+                                // Publish test results if they exist
+                                if (fileExists('users-service/test-results.xml')) {
+                                    publishTestResults testResultsPattern: 'users-service/test-results.xml'
+                                }
+                                
+                                // Archive coverage reports
+                                if (fileExists('users-service/coverage')) {
+                                    publishHTML([
+                                        allowMissing: false,
+                                        alwaysLinkToLastBuild: true,
+                                        keepAll: true,
+                                        reportDir: 'users-service/coverage',
+                                        reportFiles: 'index.html',
+                                        reportName: 'Users Service Coverage Report'
+                                    ])
+                                }
+                            }
+                        }
+                    }
+                }
+                stage('Orders Service Tests') {
+                    steps {
+                        dir('orders-service') {
+                            script {
+                                echo "🧪 Running Orders Service tests..."
+                                sh '''
+                                    npm install --save-dev jest supertest
+                                    npm test || true
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            script {
+                                // Publish test results if they exist
+                                if (fileExists('orders-service/test-results.xml')) {
+                                    publishTestResults testResultsPattern: 'orders-service/test-results.xml'
+                                }
+                                
+                                // Archive coverage reports
+                                if (fileExists('orders-service/coverage')) {
+                                    publishHTML([
+                                        allowMissing: false,
+                                        alwaysLinkToLastBuild: true,
+                                        keepAll: true,
+                                        reportDir: 'orders-service/coverage',
+                                        reportFiles: 'index.html',
+                                        reportName: 'Orders Service Coverage Report'
+                                    ])
+                                }
+                            }
+                        }
+                    }
+                }
+                stage('Integration Tests') {
+                    steps {
+                        script {
+                            echo "🔗 Running integration tests..."
+                            sh '''
+                                # Start services for integration testing
+                                docker-compose -f docker-compose.test.yml up -d
+                                
+                                # Wait for services to be ready
+                                sleep 30
+                                
+                                # Run integration tests
+                                curl -f http://localhost:3001/health || exit 1
+                                curl -f http://localhost:3002/health || exit 1
+                                
+                                # Stop test services
+                                docker-compose -f docker-compose.test.yml down
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('🐳 Build Docker Images') {
+            parallel {
+                stage('Build Users Service Image') {
+                    steps {
+                        script {
+                            echo "🐳 Building Users Service Docker image..."
+                            def usersImage = docker.build(
+                                "${USERS_SERVICE_IMAGE}:${BUILD_TAG}",
+                                "./users-service"
+                            )
+                            
+                            // Tag as latest if main branch
+                            if (env.BRANCH_NAME == 'main') {
+                                usersImage.tag("${USERS_SERVICE_IMAGE}:latest")
+                            }
+                            
+                            // Store image for later use
+                            env.USERS_IMAGE_ID = usersImage.id
+                        }
+                    }
+                }
+                stage('Build Orders Service Image') {
+                    steps {
+                        script {
+                            echo "🐳 Building Orders Service Docker image..."
+                            def ordersImage = docker.build(
+                                "${ORDERS_SERVICE_IMAGE}:${BUILD_TAG}",
+                                "./orders-service"
+                            )
+                            
+                            // Tag as latest if main branch
+                            if (env.BRANCH_NAME == 'main') {
+                                ordersImage.tag("${ORDERS_SERVICE_IMAGE}:latest")
+                            }
+                            
+                            // Store image for later use
+                            env.ORDERS_IMAGE_ID = ordersImage.id
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('🔒 Security Scan Images') {
+            parallel {
+                stage('Scan Users Service Image') {
+                    steps {
+                        script {
+                            echo "🔒 Scanning Users Service image for vulnerabilities..."
+                            sh """
+                                # Install Trivy if not available
+                                if ! command -v trivy &> /dev/null; then
+                                    curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+                                fi
+                                
+                                # Scan image
+                                trivy image --exit-code 0 --severity HIGH,CRITICAL ${USERS_SERVICE_IMAGE}:${BUILD_TAG} || true
+                            """
+                        }
+                    }
+                }
+                stage('Scan Orders Service Image') {
+                    steps {
+                        script {
+                            echo "🔒 Scanning Orders Service image for vulnerabilities..."
+                            sh """
+                                # Scan image
+                                trivy image --exit-code 0 --severity HIGH,CRITICAL ${ORDERS_SERVICE_IMAGE}:${BUILD_TAG} || true
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('📤 Push to Registry') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    echo "📤 Pushing Docker images to registry..."
+                    
+                    docker.withRegistry("https://${DOCKER_REGISTRY}", "${DOCKER_CREDENTIALS}") {
+                        // Push Users Service
+                        def usersImage = docker.image("${USERS_SERVICE_IMAGE}:${BUILD_TAG}")
+                        usersImage.push()
+                        
+                        if (env.BRANCH_NAME == 'main') {
+                            usersImage.push("latest")
+                        }
+                        
+                        // Push Orders Service
+                        def ordersImage = docker.image("${ORDERS_SERVICE_IMAGE}:${BUILD_TAG}")
+                        ordersImage.push()
+                        
+                        if (env.BRANCH_NAME == 'main') {
+                            ordersImage.push("latest")
+                        }
+                        
+                        echo "✅ Images pushed successfully to registry"
+                    }
+                }
+            }
+        }
+        
+        stage('🚀 Deploy') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    echo "🚀 Deploying to ${env.DEPLOY_ENV} environment..."
+                    
+                    // Get appropriate credentials
+                    def sshKey = getSshKeyForEnvironment(env.DEPLOY_ENV)
+                    
+                    // Deploy to target environment
+                    deployToEnvironment(env.DEPLOY_ENV, env.TARGET_HOST, sshKey)
+                }
+            }
+        }
+        
+        stage('✅ Health Check & Verification') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    echo "✅ Running health checks on ${env.DEPLOY_ENV}..."
+                    
+                    // Wait for deployment to stabilize
+                    sleep(60)
+                    
+                    // Health check Users Service
+                    sh """
+                        curl -f http://${env.TARGET_HOST}:3001/health || exit 1
+                        echo "✅ Users Service is healthy"
+                    """
+                    
+                    // Health check Orders Service
+                    sh """
+                        curl -f http://${env.TARGET_HOST}:3002/health || exit 1
+                        echo "✅ Orders Service is healthy"
+                    """
+                    
+                    // Test integration
+                    sh """
+                        # Create a test user
+                        USER_RESPONSE=\$(curl -s -X POST http://${env.TARGET_HOST}:3001/users \\
+                            -H "Content-Type: application/json" \\
+                            -d '{"name": "Test User", "email": "test@jenkins.com"}')
+                        
+                        USER_ID=\$(echo \$USER_RESPONSE | jq -r '.id')
+                        
+                        # Create a test order
+                        curl -f -X POST http://${env.TARGET_HOST}:3002/orders \\
+                            -H "Content-Type: application/json" \\
+                            -d "{\\"userId\\": \\"\$USER_ID\\", \\"items\\": [{\\"name\\": \\"Test Product\\", \\"quantity\\": 1, \\"price\\": 10.00}], \\"total\\": 10.00}" || exit 1
+                        
+                        echo "✅ Integration test passed"
+                    """
+                    
+                    echo "🎉 All health checks passed!"
+                }
+            }
+        }
+        
+        stage('📊 Performance Tests') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    echo "📊 Running performance tests..."
+                    sh """
+                        # Install Apache Bench if not available
+                        if ! command -v ab &> /dev/null; then
+                            yum install -y httpd-tools || apt-get install -y apache2-utils
+                        fi
+                        
+                        # Performance test Users Service
+                        ab -n 100 -c 10 http://${env.TARGET_HOST}:3001/health
+                        
+                        # Performance test Orders Service
+                        ab -n 100 -c 10 http://${env.TARGET_HOST}:3002/health
+                        
+                        echo "✅ Performance tests completed"
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "🧹 Cleaning up workspace..."
+                
+                // Archive artifacts
+                archiveArtifacts artifacts: '**/target/*.jar, **/coverage/**, **/test-results.xml', allowEmptyArchive: true
+                
+                // Clean up Docker images
+                sh '''
+                    docker image prune -f
+                    docker system prune -f --volumes
+                '''
+                
+                // Record build metrics
+                recordBuildMetrics()
+            }
+        }
+        
+        success {
+            script {
+                echo "🎉 Pipeline completed successfully!"
+                
+                // Send success notification
+                sendSlackNotification(
+                    'good',
+                    "✅ Deployment SUCCESS",
+                    """
+                    🎯 Environment: ${env.DEPLOY_ENV}
+                    🌿 Branch: ${env.BRANCH_NAME}
+                    📦 Build: ${env.BUILD_NUMBER}
+                    ⏱️ Duration: ${currentBuild.durationString}
+                    🔗 [View Build](${env.BUILD_URL})
+                    """
+                )
+                
+                // Update deployment status in GitHub
+                updateGitHubStatus('success', 'Deployment successful')
+            }
+        }
+        
+        failure {
+            script {
+                echo "❌ Pipeline failed!"
+                
+                // Send failure notification
+                sendSlackNotification(
+                    'danger',
+                    "❌ Deployment FAILED",
+                    """
+                    🎯 Environment: ${env.DEPLOY_ENV ?: 'N/A'}
+                    🌿 Branch: ${env.BRANCH_NAME}
+                    📦 Build: ${env.BUILD_NUMBER}
+                    ⏱️ Duration: ${currentBuild.durationString}
+                    🔗 [View Build](${env.BUILD_URL})
+                    📋 [View Logs](${env.BUILD_URL}console)
+                    """
+                )
+                
+                // Update deployment status in GitHub
+                updateGitHubStatus('failure', 'Deployment failed')
+                
+                // Collect logs for debugging
+                sh '''
+                    mkdir -p failure-logs
+                    docker logs users-service > failure-logs/users-service.log 2>&1 || true
+                    docker logs orders-service > failure-logs/orders-service.log 2>&1 || true
+                '''
+                
+                archiveArtifacts artifacts: 'failure-logs/**', allowEmptyArchive: true
+            }
+        }
+        
+        unstable {
+            script {
+                echo "⚠️ Pipeline completed with warnings!"
+                
+                sendSlackNotification(
+                    'warning',
+                    "⚠️ Deployment UNSTABLE",
+                    """
+                    🎯 Environment: ${env.DEPLOY_ENV}
+                    🌿 Branch: ${env.BRANCH_NAME}
+                    📦 Build: ${env.BUILD_NUMBER}
+                    ⏱️ Duration: ${currentBuild.durationString}
+                    🔗 [View Build](${env.BUILD_URL})
+                    """
+                )
+            }
+        }
+    }
+}
+
+// ============================
+// HELPER FUNCTIONS
+// ============================
+
+def getEnvironmentFromBranch(branchName) {
+    switch(branchName) {
+        case 'main':
+            return 'PROD'
+        case 'develop':
+            return 'DEV'
+        case ~/release\/.*/:
+            return 'QA'
+        default:
+            return 'DEV'
+    }
+}
+
+def getHostForEnvironment(environment) {
+    switch(environment) {
+        case 'DEV':
+            return env.DEV_HOST
+        case 'QA':
+            return env.QA_HOST
+        case 'PROD':
+            return env.PROD_HOST
+        default:
+            error("Unknown environment: ${environment}")
+    }
+}
+
+def getSshKeyForEnvironment(environment) {
+    switch(environment) {
+        case 'DEV':
+            return env.DEV_SSH_KEY
+        case 'QA':
+            return env.QA_SSH_KEY
+        case 'PROD':
+            return env.PROD_SSH_KEY
+        default:
+            error("Unknown environment: ${environment}")
+    }
+}
+
+def deployToEnvironment(environment, host, sshKey) {
+    echo "🚀 Starting deployment to ${environment}..."
+    
+    // Create deployment script
+    writeFile file: 'deploy.sh', text: """#!/bin/bash
+set -e
+
+echo "🚀 Starting deployment to ${environment}..."
+
+# Update system packages
+sudo yum update -y || sudo apt-get update -y
+
+# Login to Docker registry
+echo "🔐 Logging in to Docker registry..."
+echo "${DOCKER_REGISTRY_PASSWORD}" | docker login ${DOCKER_REGISTRY} -u ${DOCKER_REGISTRY_USERNAME} --password-stdin
+
+# Stop existing containers
+echo "🛑 Stopping existing containers..."
+docker-compose down || true
+
+# Pull latest images
+echo "📥 Pulling latest images..."
+export USERS_IMAGE=${DOCKER_REGISTRY}/${USERS_SERVICE_IMAGE}:${BUILD_TAG}
+export ORDERS_IMAGE=${DOCKER_REGISTRY}/${ORDERS_SERVICE_IMAGE}:${BUILD_TAG}
+
+# Create docker-compose override for this environment
+cat > docker-compose.override.yml << EOF
+version: '3.8'
+services:
+  users-service:
+    image: \${USERS_IMAGE}
+    environment:
+      - NODE_ENV=${environment.toLowerCase()}
+      - PORT=3001
+    restart: always
+    
+  orders-service:
+    image: \${ORDERS_IMAGE}
+    environment:
+      - NODE_ENV=${environment.toLowerCase()}
+      - PORT=3002
+      - USERS_SERVICE_URL=http://users-service:3001
+    restart: always
+EOF
+
+# Start services
+echo "🚀 Starting services..."
+docker-compose up -d
+
+# Wait for services to be ready
+echo "⏳ Waiting for services to be ready..."
+sleep 30
+
+# Verify services are running
+echo "✅ Verifying services..."
+docker-compose ps
+
+# Test health endpoints
+curl -f http://localhost:3001/health || exit 1
+curl -f http://localhost:3002/health || exit 1
+
+echo "🎉 Deployment to ${environment} completed successfully!"
+"""
+
+    // Make script executable
+    sh 'chmod +x deploy.sh'
+    
+    // Copy files to target server
+    sh """
+        # Copy deployment files
+        scp -i ${sshKey} -o StrictHostKeyChecking=no \\
+            deploy.sh docker-compose.yml ec2-user@${host}:~/
+            
+        # Copy environment-specific configurations
+        scp -i ${sshKey} -o StrictHostKeyChecking=no \\
+            infrastructure/nginx.conf ec2-user@${host}:~/
+    """
+    
+    // Execute deployment on remote server
+    sh """
+        ssh -i ${sshKey} -o StrictHostKeyChecking=no ec2-user@${host} \\
+            "DOCKER_REGISTRY=${DOCKER_REGISTRY} \\
+             DOCKER_REGISTRY_USERNAME=${DOCKER_REGISTRY_USERNAME} \\
+             DOCKER_REGISTRY_PASSWORD=${DOCKER_REGISTRY_PASSWORD} \\
+             USERS_SERVICE_IMAGE=${USERS_SERVICE_IMAGE} \\
+             ORDERS_SERVICE_IMAGE=${ORDERS_SERVICE_IMAGE} \\
+             BUILD_TAG=${BUILD_TAG} \\
+             bash ~/deploy.sh"
+    """
+    
+    echo "✅ Deployment to ${environment} completed successfully!"
+}
+
+def sendSlackNotification(color, title, message) {
+    if (env.SLACK_WEBHOOK) {
+        slackSend(
+            channel: '#deployments',
+            color: color,
+            message: "${title}\n${message}",
+            teamDomain: 'your-team',
+            token: env.SLACK_WEBHOOK
+        )
+    }
+}
+
+def updateGitHubStatus(state, description) {
+    script {
+        try {
+            step([
+                $class: 'GitHubCommitStatusSetter',
+                reposSource: [$class: 'ManuallyEnteredRepositorySource', url: env.GIT_URL],
+                contextSource: [$class: 'ManuallyEnteredCommitContextSource', context: 'ci/jenkins'],
+                errorHandlers: [[$class: 'ChangingBuildStatusErrorHandler', result: 'UNSTABLE']],
+                statusResultSource: [$class: 'ConditionalStatusResultSource', results: [
+                    [$class: 'AnyBuildResult', message: description, state: state]
+                ]]
+            ])
+        } catch (Exception e) {
+            echo "Failed to update GitHub status: ${e.getMessage()}"
+        }
+    }
+}
+
+def recordBuildMetrics() {
+    script {
+        // Record deployment time
+        def deploymentTime = System.currentTimeMillis() - currentBuild.startTimeInMillis
+        
+        // Log metrics
+        echo "📊 Build Metrics:"
+        echo "   Duration: ${currentBuild.durationString}"
+        echo "   Environment: ${env.DEPLOY_ENV ?: 'N/A'}"
+        echo "   Branch: ${env.BRANCH_NAME}"
+        echo "   Commit: ${env.GIT_COMMIT}"
+        
+        // Store metrics for trending
+        writeFile file: 'build-metrics.json', text: """
+        {
+            "buildNumber": ${env.BUILD_NUMBER},
+            "branch": "${env.BRANCH_NAME}",
+            "environment": "${env.DEPLOY_ENV ?: 'N/A'}",
+            "duration": ${deploymentTime},
+            "timestamp": ${System.currentTimeMillis()},
+            "result": "${currentBuild.currentResult}"
+        }
+        """
+        
+        archiveArtifacts artifacts: 'build-metrics.json', allowEmptyArchive: true
+    }
+}
