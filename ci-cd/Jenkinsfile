@@ -1,6 +1,10 @@
 // Jenkinsfile OPTIMIZADO para Performance
 pipeline {
     agent any
+
+    tools {
+        nodejs 'NodeJS' 
+    }
     
     environment {
         // Build Information
