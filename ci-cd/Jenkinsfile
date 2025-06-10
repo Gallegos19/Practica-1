@@ -1,9 +1,8 @@
-// Jenkinsfile FINAL - Con Deploy Real a tus servidores EC2
 pipeline {
     agent any
     
     tools {
-        nodejs 'NodeJS'  // Usa la configuración NodeJS que ya tienes
+        nodejs 'NodeJS' 
     }
     
     environment {
@@ -15,6 +14,7 @@ pipeline {
         QA_HOST = credentials('qa-host')
         PROD_HOST = credentials('prod-host')
         
+
         // SSH Keys
         EC2_SSH_KEY = credentials('ssh-ec2-key')
         
@@ -37,6 +37,9 @@ pipeline {
                     echo "🚀 Starting build for branch: ${env.BRANCH_NAME}"
                     echo "📦 Build number: ${env.BUILD_NUMBER}"
                     echo "🏷️ Build tag: ${BUILD_TAG}"
+                    echo "DEV_HOST: ${DEV_HOST}"
+                    echo "QA_HOST: ${QA_HOST}"
+                    echo "PROD_HOST: ${PROD_HOST}"
                     
                     // Set deployment environment based on branch
                     env.DEPLOY_ENV = getEnvironmentFromBranch(env.BRANCH_NAME)
@@ -239,7 +242,7 @@ pipeline {
         stage('🚀 Start Services & Integration Test') {
             steps {
                 script {
-                    echo "🚀 Starting microservices for integration testing..."
+                    echo "🚀 Starting practica 1 for integration testing..."
                     
                     // Start services in background and test them
                     timeout(time: 5, unit: 'MINUTES') {
@@ -488,8 +491,8 @@ EOF
             when {
                 anyOf {
                     branch 'main'
-                    branch 'develop'
-                    branch 'release/*'
+                    branch 'dev'
+                    branch 'qa'
                 }
             }
             steps {
@@ -504,13 +507,13 @@ EOF
                                 echo "📤 Uploading deployment package to ${env.TARGET_HOST}..."
                                 
                                 # Upload deployment package
-                                scp -o StrictHostKeyChecking=no -r deployment/ ubuntu@${env.TARGET_HOST}:~/microservices/
+                                scp -o StrictHostKeyChecking=no -r deployment/ ubuntu@${env.TARGET_HOST}:~/practica-1/
                                 
                                 echo "🚀 Executing deployment on ${env.TARGET_HOST}..."
                                 
                                 # Execute deployment on remote server
                                 ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_HOST} << 'EOF_REMOTE'
-                                    cd ~/microservices
+                                    cd ~/practica-1
                                     
                                     echo "Current directory: \$(pwd)"
                                     echo "Files available:"
@@ -537,8 +540,8 @@ EOF_REMOTE
             when {
                 anyOf {
                     branch 'main'
-                    branch 'develop'
-                    branch 'release/*'
+                    branch 'dev'
+                    branch 'qa'
                 }
             }
             steps {
@@ -694,9 +697,9 @@ def getEnvironmentFromBranch(branchName) {
     switch(branchName) {
         case 'main':
             return 'PROD'
-        case 'develop':
+        case 'dev':
             return 'DEV'
-        case ~/release\/.*/:
+        case 'qa':
             return 'QA'
         default:
             return 'DEV'
